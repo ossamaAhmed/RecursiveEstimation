@@ -1,6 +1,6 @@
 function [postParticles] = Estimator(prevPostParticles, sens, act, estConst, km)
 % The estimator function. The function will be called in two different
-% modes: If km==1, the estimator is initialized. If km > 0, the
+% modes: If km==0, the estimator is initialized. If km > 0, the
 % estimator does an iteration for a single sample time interval using the 
 % previous posterior particles passed to the estimator in
 % prevPostParticles and the sensor measurement and control inputs.
@@ -49,102 +49,172 @@ function [postParticles] = Estimator(prevPostParticles, sens, act, estConst, km)
 
 % Set number of particles:
 N_particles = 1000; % obviously, you will need more particles than 10.
-wkm1 = repmat(1/N_particles, N_particles, 1);
-
-% boundaries 
-bounds = polyshape(estConst.contour);
 
 %% Mode 1: Initialization
 if (km == 0)
-    % Do the initialization of your estimator here!
+    % Sample from the initial uniform distributions
+    % Choose position in circle in polar coordinates
+    r = estConst.d .* sqrt(rand(1, N_particles));
+    theta = rand(1, N_particles) * 2 * pi;
+    circ_x = r .* cos(theta);
+    circ_y = r .* sin(theta);
     
+    % Choose pA or pB
+    circ_choice = randsample([1, 2], N_particles, true);
+    circ_coords = [[estConst.pA]; [estConst.pB]];
     
-    % generate particles
-    for i = 1:N_particles 
-        prevPostParticles.x_r(1,i) = datasample([ ...
-            unifrnd(estConst.pA(1)-estConst.d, estConst.pA(1)+estConst.d), ...
-            unifrnd(estConst.pB(1)-estConst.d, estConst.pB(1)+estConst.d)], ...
-            1);
-        prevPostParticles.y_r(1,i) = datasample([ ...
-            unifrnd(estConst.pA(2)-estConst.d, estConst.pA(2)+estConst.d), ...
-            unifrnd(estConst.pB(2)-estConst.d, estConst.pB(2)+estConst.d)], ...
-            1);
-        prevPostParticles.phi(1,i) = unifrnd(-estConst.phi_0,estConst.phi_0);        
-    end
+    postParticles.x_r = transpose(circ_coords(circ_choice, 1)) + circ_x;
+    postParticles.y_r = transpose(circ_coords(circ_choice, 2)) + circ_y;
     
-    postParticles.x_r = prevPostParticles.x_r; % 1xN_particles matrix
-    postParticles.y_r = prevPostParticles.y_r; % 1xN_particles matrix
-    postParticles.phi = prevPostParticles.phi; % 1xN_particles matrix
-        
-    % and leave the function
+    % Orientation
+    postParticles.phi = (rand(1, N_particles)*2 - 1) * estConst.phi_0;
+   
     return;
-end % end init
+end
 
 %% Mode 2: Estimator iteration.
 % If km > 0, we perform a regular update of the estimator.
 
-% Implement your estimator here!
-
-% memory 
-wk = zeros(N_particles, 1);
-z_est = zeros(N_particles,1);
-particleStates = zeros(N_particles,3);
-
-x = prevPostParticles.x_r;
-y = prevPostParticles.y_r;
-phi = prevPostParticles.phi;
+% Compute the polygonal shape 
+room_polyshape = polyshape(estConst.contour);
 
 % Prior Update:
-for i = 1:N_particles
-    %sampling
-    particleStates(i,1) = x(i)+(act(1)+unifrnd(-estConst.sigma_f,estConst.sigma_f))*cos(phi(i));
-    particleStates(i,2) = y(i)+(act(1)+unifrnd(-estConst.sigma_f,estConst.sigma_f))*sin(phi(i));
-    particleStates(i,3) = phi(i)+act(2)+unifrnd(-estConst.sigma_phi,estConst.sigma_phi); 
 
-    % est measurements
-    lineseg = [x(i) y(i); x(i)+3*cos(phi(i)) y(i)+3*sin(phi(i))];
-    [~,out] = intersect(bounds, lineseg);
-    x_C = out(1,1);
-    y_C = out(1,2);
-    
-    wki = 0; % measurement noise
-    z_est(i) = sqrt((x(i)-x_C)^2+(y(i)-y_C)^2) + wki;
-    prior = sens - z_est(i);
-    
-    % weights
-    sigma_v = sqrt(0.001);
-    wk(i) = wkm1(i) * normpdf(prior, 0, sigma_v);
+% Compute process noises
+v_f = (rand(1, N_particles)*2 - 1) * estConst.sigma_f;
+v_phi = (rand(1, N_particles)*2 - 1) * estConst.sigma_phi;
 
-    
-end
+% Apply system dynamics 
+new_x_r = prevPostParticles.x_r + ...
+    ((act(1) + v_f)) .* cos(prevPostParticles.phi);
+new_y_r = prevPostParticles.y_r + ...
+    ((act(1) + v_f)) .* sin(prevPostParticles.phi);
+new_phi = prevPostParticles.phi + act(2) + v_phi;
 
+% Check if particles are still within room
+check = isinterior(room_polyshape, new_x_r, new_y_r);
+[new_x_r, new_y_r, new_phi] = arrayfun(@select_update, check', ... 
+    prevPostParticles.x_r, prevPostParticles.y_r, prevPostParticles.phi, ...
+    new_x_r, new_y_r, new_phi);
+postParticles.x_r = new_x_r;
+postParticles.y_r = new_y_r;
+postParticles.phi = new_phi;
 
 % Posterior Update:
-wk = wk./sum(wk);
 
-% effective sapling size
-Neff = 1/sum(wk.^2);
+% Compute the distance of every particle to the facing wall
+x_p = particle_measurement(postParticles, room_polyshape, estConst, N_particles);
 
-% Resampling 
-resample_perc = 0.9;
-Nt = resample_perc * N_particles;
-if Neff < Nt
-    disp('Resampling...')
-    idx = randsample(1:N_particles, N_particles, true, wk);
-    particleStates = particleStates(idx, :);
-    
-    wk = repmat(1/N_particles, 1, N_particles);
-    
-end 
+% Calculate theoretical noise of every particle and probabilities
+w = sens - x_p ;
+p_w = noise_pdf(w, estConst.epsilon);
+p_w = p_w / sum(p_w);
 
-particleFinalState = zeros(1,3); 
-for i = 1:N_particles
-    particleFinalState = particleFinalState + wk(i)*particleStates(i,:);
+ratio_non_zeros = 1 - sum(p_w==0) / N_particles;
+reg_w = -log(ratio_non_zeros + 0.05) + log(1.05);
+
+% Scale each particle by the measurement likelihood
+c_pdf = cumsum(p_w);
+p_sample = rand(1, N_particles);
+
+% Re-sample particles
+k = bsxfun(@minus, p_sample(:)', c_pdf(:)); 
+k(k > 0) = -inf;
+[~, new_particles] = max(k);
+
+sample_diversity_ratio = length(unique(new_particles))/N_particles;
+reg_d = -log(sample_diversity_ratio + 0.1) + log(1.1);
+reg_f = reg_w * reg_d;
+
+if sample_diversity_ratio < 0.1
+    new_particles = arrayfun(@randomize_particle_choice, new_particles, ...
+        ones(1, N_particles) * N_particles);
 end
 
+postParticles.x_r = postParticles.x_r(new_particles);
+postParticles.y_r = postParticles.y_r(new_particles);
+postParticles.phi = postParticles.phi(new_particles);
 
-postParticles.x_r = particleStates(:,1);
-postParticles.y_r = particleStates(:,2);
-postParticles.phi = particleStates(:,3);
+% Roughening
+K = 0.01;
+d = 3;
+E = [max(postParticles.x_r)-min(postParticles.x_r); ...
+    max(postParticles.y_r)-min(postParticles.y_r); ...
+    max(postParticles.phi)-min(postParticles.phi)];
+s = K * E * N_particles ^ (-1/d) * reg_f;
+
+postParticles.x_r = postParticles.x_r + normrnd(0, s(1), [1, N_particles]);
+postParticles.y_r = postParticles.y_r + normrnd(0, s(2), [1, N_particles]);
+postParticles.phi = postParticles.phi + normrnd(0, s(3), [1, N_particles]);
 
 end % end estimator
+
+
+function[particle] = randomize_particle_choice(particle, N)
+    if rand > 0.9
+        particle = unidrnd(N);
+    end
+end
+
+function[selected_x_r, selected_y_r, selected_phi] = select_update(...
+    check, prev_x_r, prev_y_r, prev_phi, new_x_r, new_y_r, new_phi)
+if check
+    selected_x_r = new_x_r;
+    selected_y_r = new_y_r;
+    selected_phi = new_phi;
+else
+    selected_x_r = prev_x_r;
+    selected_y_r = prev_y_r;
+    selected_phi = prev_phi;
+end
+end
+
+function[p_w] = noise_pdf(noise_v, eps)
+p_w = zeros(1, length(noise_v));
+for i=1:length(noise_v)
+    noise = noise_v(i);
+    if noise < -3*eps 
+        p_w(i) = 0;
+    elseif noise < -2.5*eps
+        p_w(i) = (noise + 3*eps) * 2/(5*eps^2);
+    elseif noise < -2.0*eps
+        p_w(i) = -(noise + 2*eps) * 2/(5*eps^2);
+    elseif noise < 0
+        p_w(i) = (noise + 2*eps) * 1/(5*eps^2);
+    elseif noise < 2*eps
+        p_w(i) = 2/(5*eps) - noise * 1/(5*eps^2);
+    elseif noise < 2.5*eps
+        p_w(i) = (noise - 2*eps) * 2/(5*eps^2);
+    elseif noise < 3.0*eps
+        p_w(i) = 1/(5*eps) - (noise - 2.5*eps)* 2/(5*eps^2);
+    else
+        p_w(i) = 0;
+    end 
+end
+end
+
+function[range_sensor] = particle_measurement(postParticles, ...
+    room_polyshape, estConst, N)
+    
+    x_range = max(estConst.contour(:, 1)) - min(estConst.contour(:, 1));
+    y_range = max(estConst.contour(:, 2)) - min(estConst.contour(:, 2));
+    max_d = sqrt(x_range*2 + y_range*2)* 1.1;
+    
+    x_out = postParticles.x_r + cos(postParticles.phi) * max_d;
+    y_out = postParticles.y_r + sin(postParticles.phi) * max_d;
+
+    lineseg = zeros(2, 2, N);
+    lineseg(1, 1, :) = postParticles.x_r;
+    lineseg(1, 2, :) = postParticles.y_r;
+    lineseg(2, 1, :) = x_out;
+    lineseg(2, 2, :) = y_out;
+    
+    intersections = zeros(2, N);
+    
+    for i=1:N
+        [~, out] = intersect(room_polyshape, lineseg(:, :, i));
+        intersections(:, i) = out(1, :);
+    end
+    range_sensor = sqrt((postParticles.x_r - intersections(1, :)).^2 + ...
+        (postParticles.y_r - intersections(2, :)).^2);
+end
