@@ -42,4 +42,4 @@ const.sigma_phi = 0.05; % Parameter for process noise v_phi
 const.sigma_f = 0.01; % Parameter for process noise v_f
 
 % measurement noise
-const.epsilon = 0.02; % Parameter for measurement noise w
+const.epsilon = 0.05; % Parameter for measurement noise w
