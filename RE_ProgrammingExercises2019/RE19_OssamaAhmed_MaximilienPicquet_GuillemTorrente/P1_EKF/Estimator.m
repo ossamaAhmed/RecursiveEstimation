@@ -85,7 +85,7 @@ if (tm == 0)
     % estimator variance init (initial posterior variance)
     estState.Pm = diag([posVar,linVelVar,oriVar,driftVar]);
     % estimator state
-    estState.xm = [posVar, linVelVar, oriVar, driftVar];
+    estState.xm = [posEst, linVelEst, oriEst, driftEst];
     % time of last update
     estState.tm = tm;
     return;
